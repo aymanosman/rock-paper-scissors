@@ -16,7 +16,7 @@ type Score = Int
 data Cmd =
   StartGame SockAddr
   | Choose SockAddr
-  | Choosen Choice
+  | Chosen Choice
 
 data Choice = Rock | Paper | Scissors
   deriving (Show)
@@ -52,6 +52,8 @@ main = do
         return c
 
       cleanup = do
+        putStrLn $ "Player left the game : " ++ show remoteAddr
+        -- inform opponent
         putStrLn "Cleaning up..."
         atomically $ modifyTVar t $ \g ->
           let ps = filter ((/= remoteAddr) . fst) (players g)
@@ -66,23 +68,36 @@ main = do
             putStrLn $ "got start game from " <> show pAddr
             c' <- atomically $ getPlayerChan pAddr t
             atomically $ writeTChan c' $ Choose remoteAddr
-            choice <- readPlayerChoice sock
-            send sock $ BS.pack $ "You chose " <> show choice
-            runPlayer c
+            mchoice <- readPlayerChoice sock
+            case mchoice of
+              Nothing -> do
+                -- disconnectecd , TODO inform other player
+                -- atomically $ writeTChan c' $ OtherQuit
+                putStrLn $ "I think player has disconnected (player: "++show remoteAddr++" )"
+                putStrLn "TODO: interrupt other player, and put them back on waiting list"
+                return () -- exit
+              Just choice -> do
+                atomically $ writeTChan c' $ Chosen choice
+                send sock $ BS.pack $ "You chose " <> show choice <> "\n"
+                runPlayer c -- add state of MY choice
 
           Choose pAddr -> do
-            choice <- readPlayerChoice sock
-            case choice of
+            mchoice <- readPlayerChoice sock
+            case mchoice of
               Nothing ->
                 return ()
-              Just choice' -> do
+              Just choice -> do
                 c' <- atomically $ getPlayerChan pAddr t
-                atomically $ writeTChan c' $ Choosen choice'
+                send sock $ BS.pack $ "You chose " <> show choice <> "\n"
+                atomically $ writeTChan c' $ Chosen choice
                 runPlayer c
 
-          Choosen choice -> do
-            send sock $ BS.pack $ "The other player chose " <> show choice
-            runPlayer c
+          Chosen choice -> do
+            send sock $ BS.pack $ "The other player chose " <> show choice <> "\n"
+            send sock $ BS.pack $ "Therefore you (todo)" <> showResult (winOrLose choice choice) <> "\n" -- todo
+            send sock "Cooling off for 5 seconds before joining another game...\n"
+            threadDelay (5000 * 1000)
+            tryJoinGame c
 
         return ()
 
@@ -119,7 +134,7 @@ getPlayerChan sockAddr tgame = do
 
 readPlayerChoice :: Socket -> IO (Maybe Choice)
 readPlayerChoice sock  = do
-  send sock "Choose (r)rock (p)aper (s)cissors\n"
+  send sock "Choose (r)ock (p)aper or (s)cissors\n"
   mreply <- recv sock 1024
   case mreply of
     Just "r\n" -> do
@@ -136,3 +151,19 @@ readPlayerChoice sock  = do
       send sock "You'r shit, try again...\n"
       readPlayerChoice sock
     Nothing -> return Nothing
+
+
+data WinOrLose = Win | Lose | Draw
+
+-- | [winOrLose me you]
+winOrLose :: Choice -> Choice -> WinOrLose
+winOrLose Rock Scissors = Win
+winOrLose Rock Paper = Lose
+winOrLose Rock Rock = Draw
+winOrLose _ _ = Draw
+
+
+showResult :: WinOrLose -> String
+showResult Win = "win"
+showResult Lose = "lose"
+showResult Draw = "draw"
